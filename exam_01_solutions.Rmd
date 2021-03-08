@@ -1,0 +1,213 @@
+---
+title: "Exam 01 Solutions"
+author: ""
+date: ""
+output: 
+  html_document:
+    toc: true
+    toc_depth: 2
+    toc_float: true
+    number_sections: false
+    df_print: paged
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, comment = NA, 
+                      message = FALSE, warning = FALSE)
+```
+
+## Packages
+
+```{r packages}
+library(tidyverse)
+library(lubridate)
+```
+
+## Data
+
+```{r data}
+air_quality <- readRDS(file = "data/air_quality.rds")
+# air_quality <- readRDS(file = "data/air_quality_test.rds")
+```
+
+## Task 1
+
+Unpack the list and create a tidy tibble
+
+```{r task_1_unpack}
+# get regions and number of dates for each region
+regions <- names(air_quality$data)
+day_counts <- map_dbl(regions, ~length(air_quality$data[[.x]]))
+
+# expand vectors for iteration in map2_dfr
+regions_rep <- rep(regions, times = day_counts)
+day_counts_rep <- unlist(map(day_counts, seq))
+
+# unpack list without explicitly referencing dates or regions
+aq <- map2_dfr(regions_rep, day_counts_rep, 
+         ~map_df(air_quality$data[[.x]][[.y]]$results, unlist))
+
+glimpse(aq)
+```
+
+Clean up names
+
+```{r task_1_rename}
+aq <- aq %>% 
+  rename("date_utc"   = date.utc,
+         "date_local" = date.local,
+         "latitude"   = coordinates.latitude,
+         "longitude"  = coordinates.longitude,
+         "region"     = city)
+
+glimpse(aq)
+```
+
+Fix `NA` values in country and city
+
+```{r task_1_region_measurement_count_fcn}
+# get number of measurements for each region
+region_measurement_count <- function(region) {
+  region_list <- air_quality$data[[region]]
+  sum(map_dbl(1:length(region_list), ~length(region_list[[.x]]$results)))
+}
+
+counts_by_region <- map_dbl(regions, region_measurement_count)
+```
+
+```{r task_1_fill_NA}
+aq <- aq %>% 
+  mutate(country = "US", 
+         region  = rep(regions, times = counts_by_region))
+
+glimpse(aq)
+```
+
+Fix specified numeric data types
+
+```{r task_1_data_type_fixes}
+aq <- aq %>% 
+  mutate(across(.cols = c(value, latitude, longitude), as.numeric))
+
+glimpse(aq)
+```
+
+Parse date variables
+
+```{r task_1_date_parse}
+aq <- aq %>% 
+  mutate(date_utc         = ymd_hms(date_utc),
+         year_utc         = year(date_utc),
+         month_utc        = month(date_utc),
+         month_name_utc   = month(date_utc, label = TRUE),
+         day_utc          = day(date_utc),
+         day_name_utc     = wday(date_utc, label = TRUE),
+         hour_utc         = hour(date_utc)) %>% 
+  mutate(date_local = str_remove(date_local, pattern = "-\\d{2}:\\d{2}$")) %>%
+  mutate(date_local       = ymd_hms(date_local),
+         year_local       = year(date_local),
+         month_local      = month(date_local),
+         month_name_local = month(date_local, label = TRUE),
+         day_local        = day(date_local),
+         day_name_local   = wday(date_local, label = TRUE),
+         hour_local       = hour(date_local)) %>% 
+  select(country, region, location, latitude, longitude,
+         ends_with("_utc"), ends_with("_local"),
+         parameter, value, unit)
+
+glimpse(aq)
+```
+
+Check `aq` matches with `aq_clean`
+
+```{r check_result}
+aq_clean <- read_rds("data/aq_clean.rds")
+all_equal(aq, aq_clean)
+```
+
+## Task 2
+
+```{r task_2}
+aq %>% 
+  select(region, location) %>% 
+  distinct() %>% 
+  count(region)
+```
+
+## Task 3
+
+```{r task_3}
+aq %>% 
+  filter(parameter == "pm25", day_utc < 8) %>% 
+  group_by(region) %>% 
+  summarise(iqr_pm25  = IQR(value),
+            mean_pm25 = mean(value),
+            med_pm25  = median(value))
+```
+
+## Task 4
+
+```{r task_4}
+aq %>% 
+  filter(str_detect(region, pattern = "^San Fran")) %>%  
+  mutate(hour_block = if_else(hour_local < 12, "early", "late")) %>% 
+  count(location, hour_block) %>% 
+  group_by(location) %>% 
+  mutate(proportion = n / sum(n)) %>% 
+  ungroup() %>% 
+  arrange(desc(proportion)) %>% 
+  slice(1) %>% 
+  select(location)
+```
+
+## Task 5
+
+```{r task_5}
+# get 5 locations with most measurements taken of pm25
+location_top_5 <- aq %>% 
+  filter(str_detect(region, "^Portland"), parameter == "pm25") %>% 
+  count(location) %>% 
+  arrange(desc(n)) %>% 
+  slice(1:5) %>% 
+  pull(location)
+
+day_blocks <- str_c("Sep ", str_c(seq(1, 13, 3), "-", seq(3, 15, 3)))
+
+aq %>% 
+  filter(location %in% location_top_5, parameter == "pm25") %>% 
+  select(parameter, value, day_local) %>% 
+  mutate(day_local_block = case_when(
+    day_local <= 3  ~ day_blocks[1],
+    day_local <= 6  ~ day_blocks[2],
+    day_local <= 9  ~ day_blocks[3],
+    day_local <= 12 ~ day_blocks[4],
+    day_local <= 15 ~ day_blocks[5]
+  )) %>% 
+  mutate(day_local_block = ordered(day_local_block, levels = day_blocks)) %>% 
+  group_by(day_local_block) %>% 
+  summarise(mean_pm25   = mean(value),
+            median_pm25 = median(value)) %>% 
+  filter(!is.na(day_local_block))
+```
+
+## Task 6
+
+```{r task_6, fig.width = 9, fig.height=6}
+aq %>% 
+  filter(str_detect(region, pattern = "^Allen")) %>% 
+  select(location, parameter, unit, value, date_local) %>% 
+  mutate(parameter = str_c(parameter, " - ", unit)) %>% 
+  ggplot(aes(x = date_local, y = value)) +
+  geom_line(aes(group = parameter, color = location)) +
+  scale_x_datetime(date_breaks = "3 days", date_labels = "%b %d") +
+  scale_color_manual(values = c("#e41a1c", "#4daf4a")) +
+  facet_wrap(~ parameter, scales = "free_y") +
+  theme_bw(base_size = 14) +
+  theme(legend.position = "bottom") +
+  labs(x = "", color = "Measurement location", y = "Value")
+```
+
+## Task 7
+
+Answers will vary.
